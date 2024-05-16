@@ -1,0 +1,70 @@
+type Scheduler struct {
+
+##  调度的主体结构，负责管理整个调度过程
+
+	Cache internalcache.Cache
+
+##  缓存当前集群调度的状态，包含所有节点和已调度的 Pod 的状态，以及一些临时假设的 Pod 状态，优化调度流程
+
+	Extenders []framework.Extender
+
+##  扩展器，用以接入自定义的调度策略。
+
+	NextPod func(logger klog.Logger) (*framework.QueuedPodInfo, error)
+
+##  NextPod是一个阻塞函数，这个函数会将调度器暂时挂起，直到有一个新的 Pod 可供调度时，程序才会继续执行。
+##  这个方法可以优化资源消耗
+
+	FailureHandler FailureHandlerFn
+
+##  错误处理，应该是调出日志一类的。
+
+	SchedulePod func(ctx context.Context, fwk framework.Framework, state *framework.CycleState, pod *v1.Pod) (ScheduleResult, error)
+
+##  SchedulePod会尝试将给定的 Pod 调度到节点列表中的某一个节点。如果调度成功会返回建议的主机名称/编号，否则返回 FitError 与错误原因。
+
+	StopEverything <-chan struct{}
+
+##  终止调度器
+##  通常，调度器会在一个 Goroutine 中运行调度循环，同时监听 StopEverything 通道。一旦通道关闭，调度器会执行清理操作并停止工作。
+##  使用一个通道可以对所有正在监控这个通道的程序进行广播，监测到这个通道关闭后，所有监测到这个变化的程序会在同一时间关闭。
+##  与布尔标识（Flag）相比的好处：使用布尔标识的互斥手段需要比较复杂的连锁操作，而通过通道进行关闭可以更加简单且安全的进行处理
+
+	SchedulingQueue internalqueue.SchedulingQueue
+
+##  SchedulingQueue是调度队列，用来存储等待调度的 Pod
+
+
+	Profiles profile.Map
+##  这里是调度配置文件，定义了调度策略和插件
+
+	client clientset.Interface
+##  用户接口，用于与 API 服务器通信。
+
+	nodeInfoSnapshot *internalcache.Snapshot
+##  生成节点当前的信息快照，用于调度决策。
+
+	percentageOfNodesToScore int32
+##  这里是选定需要打分的节点数量，这里的int32只代表整型数据，具体需要在配置文件中指定
+##  选择一定数量的节点进行打分，可以优化程序的效率
+
+	nextStartNodeIndex int
+##  这个字段会定义在 Kubernetes 调度器调度循环中，遍历Node列表时的开始位置
+##  在完成了一次绑定之后，nextStartNodeIndex就会放在在这个绑定的节点上，接着下一次轮寻就会从这个位置开始
+
+	
+	logger klog.Logger
+##  初始化记录器
+##  源程序中有一个提示：创建调度程序时 *必须* 初始化记录器，否则日志记录函数将访问 nil 接收器并报错。
+
+	registeredHandlers []cache.ResourceEventHandlerRegistration
+##  这里设置了一个管理和跟踪调度器中所有已注册的资源事件处理程序，会对Pod与节点的变化产生反应。
+##  例如Pod的增加与消除和节点信息的变化
+
+
+}
+
+func (sched *Scheduler) applyDefaultHandlers() {
+	sched.SchedulePod = sched.schedulePod
+	sched.FailureHandler = sched.handleSchedulingFailure
+}
