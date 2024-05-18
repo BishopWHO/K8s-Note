@@ -1,4 +1,8 @@
+##	此处略去对各种各样地调用	##
+
 type Scheduler struct {
+
+##  这里定义了一个Scheduler结构体，用以对调度器进行初始化定义，也就是为调度器提供框架
 
 	Cache internalcache.Cache
 
@@ -62,16 +66,22 @@ type Scheduler struct {
 
 }
 
-##  这里定义了一个Scheduler结构体，用以对调度器进行初始化定义
 
 func (sched *Scheduler) applyDefaultHandlers() {
+
+##  这个功能函数将会对调度器进行初始化，确保调度器具有基本的调度逻辑与除错手段。
+
 	sched.SchedulePod = sched.schedulePod
 	sched.FailureHandler = sched.handleSchedulingFailure
 }
 
-##  这个功能函数将会对调度器进行初始化，确保调度器具有基本的调度逻辑与除错手段。
+
 
 type schedulerOptions struct {
+
+##  这个结构体会对Scheduler结构体进行进一步设置，例如配置调度策略与Pod处理的优先级。
+
+
 	componentConfigVersion string
 	kubeConfig             *restclient.Config
 	
@@ -79,36 +89,59 @@ type schedulerOptions struct {
 	##  此处的原文是 Overridden by profile level percentageOfNodesToScore if set in v1.
 
 	percentageOfNodesToScore          int32
+
+	##  表示在调度过程中需要评分的节点的百分比。这可以减少调度过程中需要考虑的节点数量，从而优化性能
+	##  这个部分在初始化结构中也有
+
 	podInitialBackoffSeconds          int64
 	podMaxBackoffSeconds              int64
+
+	##  定义Pod调度失败后，再次进行调度需要的时间范围
+	
 	podMaxInUnschedulablePodsDuration time.Duration
-	// Contains out-of-tree plugins to be merged with the in-tree registry.
+
+	##  这里指定了一个Pod可以处于等待队列中存在多长时间
+	##  长时间无法进行调度应该会将这个Pod定义为无法调度。
+
 	frameworkOutOfTreeRegistry frameworkruntime.Registry
 	profiles                   []schedulerapi.KubeSchedulerProfile
 	extenders                  []schedulerapi.Extender
 	frameworkCapturer          FrameworkCapturer
 	parallelism                int32
 	applyDefaultProfile        bool
+
+	##  相关插件的整合
 }
 
-##  这个结构体会对Scheduler结构体进行进一步设置，例如配置调度策略与Pod处理的优先级。
 
-// Option configures a Scheduler
 type Option func(*schedulerOptions)
 
-// ScheduleResult represents the result of scheduling a pod.
+##  此处正式开始配置调度文件
+##  这是一个函数选项模式（Functional Options Pattern），这里单独只定义了一个指向schedulerOptions结构体的指针。
+##  但是之后所有使用这个Option，直接对schedulerOptions内部的相关函数进行定义
+
+
 type ScheduleResult struct {
-	// Name of the selected node.
+
+##  调度的结果
+	
 	SuggestedHost string
-	// The number of nodes the scheduler evaluated the pod against in the filtering
-	// phase and beyond.
-	// Note that it contains the number of nodes that filtered out by PreFilterResult.
+	##  调度系统为Pod选择的节点。
+
+
 	EvaluatedNodes int
-	// The number of nodes out of the evaluated ones that fit the pod.
 	FeasibleNodes int
-	// The nominating info for scheduling cycle.
 	nominatingInfo *framework.NominatingInfo
+
+	##  EvaluatedNodes: 表示在过滤阶段考虑的节点总数。
+	##  FeasibleNodes: 在评估的节点中，实际适合部署Pod的节点数。
+	##  nominatingInfo: 提名信息，用于存储调度周期相关的额外信息。
+
+	##  这里记录了在调度过程的过滤阶段以及随后的阶段中，调度器考虑了多少个节点，这些节点的打分情况与这些节点的信息
+	##  可以更方便地对调度器的工作情况进行分析
 }
+
+
 
 // WithComponentConfigVersion sets the component config version to the
 // KubeSchedulerConfiguration version used. The string should be the full
