@@ -143,15 +143,15 @@ type ScheduleResult struct {
 
 
 
-// WithComponentConfigVersion sets the component config version to the
-// KubeSchedulerConfiguration version used. The string should be the full
-// scheme group/version of the external type we converted from (for example
-// "kubescheduler.config.k8s.io/v1")
+## ## ## ##  下列内容都是Option函数，直接对schedulerOptions内部的相关函数进行定义	## ## ## ## 
+
 func WithComponentConfigVersion(apiVersion string) Option {
 	return func(o *schedulerOptions) {
 		o.componentConfigVersion = apiVersion
 	}
 }
+
+##	这里设置了调度器配置的版本
 
 // WithKubeConfig sets the kube config for Scheduler.
 func WithKubeConfig(cfg *restclient.Config) Option {
@@ -159,6 +159,8 @@ func WithKubeConfig(cfg *restclient.Config) Option {
 		o.kubeConfig = cfg
 	}
 }
+
+##	这里设置了与Kubernetes集群通信的相关配置
 
 // WithProfiles sets profiles for Scheduler. By default, there is one profile
 // with the name "default-scheduler".
@@ -169,15 +171,18 @@ func WithProfiles(p ...schedulerapi.KubeSchedulerProfile) Option {
 	}
 }
 
-// WithParallelism sets the parallelism for all scheduler algorithms. Default is 16.
+##	这里配置了调度器的调度配置文件，在默认情况下，这里应该提供一个default-scheduler
+
+
 func WithParallelism(threads int32) Option {
 	return func(o *schedulerOptions) {
 		o.parallelism = threads
 	}
 }
 
-// WithPercentageOfNodesToScore sets percentageOfNodesToScore for Scheduler.
-// The default value of 0 will use an adaptive percentage: 50 - (num of nodes)/125.
+##	这里设置了调度算法的并行执行线程数，初始是16。
+
+
 func WithPercentageOfNodesToScore(percentageOfNodesToScore *int32) Option {
 	return func(o *schedulerOptions) {
 		if percentageOfNodesToScore != nil {
@@ -186,13 +191,16 @@ func WithPercentageOfNodesToScore(percentageOfNodesToScore *int32) Option {
 	}
 }
 
-// WithFrameworkOutOfTreeRegistry sets the registry for out-of-tree plugins. Those plugins
-// will be appended to the default registry.
+##	这里配置了评分阶段时考虑的节点的百分比
+
+
 func WithFrameworkOutOfTreeRegistry(registry frameworkruntime.Registry) Option {
 	return func(o *schedulerOptions) {
 		o.frameworkOutOfTreeRegistry = registry
 	}
 }
+
+##	这里在设置外部插件的注册表
 
 // WithPodInitialBackoffSeconds sets podInitialBackoffSeconds for Scheduler, the default value is 1
 func WithPodInitialBackoffSeconds(podInitialBackoffSeconds int64) Option {
@@ -208,6 +216,8 @@ func WithPodMaxBackoffSeconds(podMaxBackoffSeconds int64) Option {
 	}
 }
 
+##	这里设置了Pod调度失败后重试调度的初始和最大退避时间。
+
 // WithPodMaxInUnschedulablePodsDuration sets podMaxInUnschedulablePodsDuration for PriorityQueue.
 func WithPodMaxInUnschedulablePodsDuration(duration time.Duration) Option {
 	return func(o *schedulerOptions) {
@@ -215,12 +225,21 @@ func WithPodMaxInUnschedulablePodsDuration(duration time.Duration) Option {
 	}
 }
 
+##	这里设置了Pod在优先队列中因不可调度而最大等待时间。
+
 // WithExtenders sets extenders for the Scheduler
 func WithExtenders(e ...schedulerapi.Extender) Option {
 	return func(o *schedulerOptions) {
 		o.extenders = e
 	}
 }
+
+##	这个部分用来添加扩展器到调度器，这些扩展器可以参与调度决策过程。
+
+##	上面大部分的内容都是对schedulerOptions的客制化定义
+##	这个方法不通过一个静态定义来建立schedulerOptions结构，使用会更加灵活
+
+## ## ## ##  至此，Option部分结束	## ## ## ## 
 
 // FrameworkCapturer is used for registering a notify function in building framework.
 type FrameworkCapturer func(schedulerapi.KubeSchedulerProfile)
