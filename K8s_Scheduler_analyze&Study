@@ -1,7 +1,5 @@
 type Scheduler struct {
 
-##  调度的主体结构，负责管理整个调度过程
-
 	Cache internalcache.Cache
 
 ##  缓存当前集群调度的状态，包含所有节点和已调度的 Pod 的状态，以及一些临时假设的 Pod 状态，优化调度流程
@@ -13,7 +11,7 @@ type Scheduler struct {
 	NextPod func(logger klog.Logger) (*framework.QueuedPodInfo, error)
 
 ##  NextPod是一个阻塞函数，这个函数会将调度器暂时挂起，直到有一个新的 Pod 可供调度时，程序才会继续执行。
-##  这个方法可以优化资源消耗
+##  这个方法本质也还是用以读取下一个Pod，但是可以优化资源消耗。
 
 	FailureHandler FailureHandlerFn
 
@@ -59,12 +57,467 @@ type Scheduler struct {
 
 	registeredHandlers []cache.ResourceEventHandlerRegistration
 ##  这里设置了一个管理和跟踪调度器中所有已注册的资源事件处理程序，会对Pod与节点的变化产生反应。
-##  例如Pod的增加与消除和节点信息的变化
-
+##  每当一个新的Pod创建请求发出时，调度器通过这些注册的处理程序来执行一系列操作，例如给节点打分，过滤或者绑定。
+##  源程序说明中指出这个函数也负责检查所有处理程序是否在调度周期开始之前完成同步。
 
 }
+
+##  这里定义了一个Scheduler结构体，用以对调度器进行初始化定义
 
 func (sched *Scheduler) applyDefaultHandlers() {
 	sched.SchedulePod = sched.schedulePod
 	sched.FailureHandler = sched.handleSchedulingFailure
+}
+
+##  这个功能函数将会对调度器进行初始化，确保调度器具有基本的调度逻辑与除错手段。
+
+type schedulerOptions struct {
+	componentConfigVersion string
+	kubeConfig             *restclient.Config
+	
+	##  这个部分似乎是用来标识调度器的版本信息？而且可以在其他文件中定义
+	##  此处的原文是 Overridden by profile level percentageOfNodesToScore if set in v1.
+
+	percentageOfNodesToScore          int32
+	podInitialBackoffSeconds          int64
+	podMaxBackoffSeconds              int64
+	podMaxInUnschedulablePodsDuration time.Duration
+	// Contains out-of-tree plugins to be merged with the in-tree registry.
+	frameworkOutOfTreeRegistry frameworkruntime.Registry
+	profiles                   []schedulerapi.KubeSchedulerProfile
+	extenders                  []schedulerapi.Extender
+	frameworkCapturer          FrameworkCapturer
+	parallelism                int32
+	applyDefaultProfile        bool
+}
+
+##  这个结构体会对Scheduler结构体进行进一步设置，例如配置调度策略与Pod处理的优先级。
+
+// Option configures a Scheduler
+type Option func(*schedulerOptions)
+
+// ScheduleResult represents the result of scheduling a pod.
+type ScheduleResult struct {
+	// Name of the selected node.
+	SuggestedHost string
+	// The number of nodes the scheduler evaluated the pod against in the filtering
+	// phase and beyond.
+	// Note that it contains the number of nodes that filtered out by PreFilterResult.
+	EvaluatedNodes int
+	// The number of nodes out of the evaluated ones that fit the pod.
+	FeasibleNodes int
+	// The nominating info for scheduling cycle.
+	nominatingInfo *framework.NominatingInfo
+}
+
+// WithComponentConfigVersion sets the component config version to the
+// KubeSchedulerConfiguration version used. The string should be the full
+// scheme group/version of the external type we converted from (for example
+// "kubescheduler.config.k8s.io/v1")
+func WithComponentConfigVersion(apiVersion string) Option {
+	return func(o *schedulerOptions) {
+		o.componentConfigVersion = apiVersion
+	}
+}
+
+// WithKubeConfig sets the kube config for Scheduler.
+func WithKubeConfig(cfg *restclient.Config) Option {
+	return func(o *schedulerOptions) {
+		o.kubeConfig = cfg
+	}
+}
+
+// WithProfiles sets profiles for Scheduler. By default, there is one profile
+// with the name "default-scheduler".
+func WithProfiles(p ...schedulerapi.KubeSchedulerProfile) Option {
+	return func(o *schedulerOptions) {
+		o.profiles = p
+		o.applyDefaultProfile = false
+	}
+}
+
+// WithParallelism sets the parallelism for all scheduler algorithms. Default is 16.
+func WithParallelism(threads int32) Option {
+	return func(o *schedulerOptions) {
+		o.parallelism = threads
+	}
+}
+
+// WithPercentageOfNodesToScore sets percentageOfNodesToScore for Scheduler.
+// The default value of 0 will use an adaptive percentage: 50 - (num of nodes)/125.
+func WithPercentageOfNodesToScore(percentageOfNodesToScore *int32) Option {
+	return func(o *schedulerOptions) {
+		if percentageOfNodesToScore != nil {
+			o.percentageOfNodesToScore = *percentageOfNodesToScore
+		}
+	}
+}
+
+// WithFrameworkOutOfTreeRegistry sets the registry for out-of-tree plugins. Those plugins
+// will be appended to the default registry.
+func WithFrameworkOutOfTreeRegistry(registry frameworkruntime.Registry) Option {
+	return func(o *schedulerOptions) {
+		o.frameworkOutOfTreeRegistry = registry
+	}
+}
+
+// WithPodInitialBackoffSeconds sets podInitialBackoffSeconds for Scheduler, the default value is 1
+func WithPodInitialBackoffSeconds(podInitialBackoffSeconds int64) Option {
+	return func(o *schedulerOptions) {
+		o.podInitialBackoffSeconds = podInitialBackoffSeconds
+	}
+}
+
+// WithPodMaxBackoffSeconds sets podMaxBackoffSeconds for Scheduler, the default value is 10
+func WithPodMaxBackoffSeconds(podMaxBackoffSeconds int64) Option {
+	return func(o *schedulerOptions) {
+		o.podMaxBackoffSeconds = podMaxBackoffSeconds
+	}
+}
+
+// WithPodMaxInUnschedulablePodsDuration sets podMaxInUnschedulablePodsDuration for PriorityQueue.
+func WithPodMaxInUnschedulablePodsDuration(duration time.Duration) Option {
+	return func(o *schedulerOptions) {
+		o.podMaxInUnschedulablePodsDuration = duration
+	}
+}
+
+// WithExtenders sets extenders for the Scheduler
+func WithExtenders(e ...schedulerapi.Extender) Option {
+	return func(o *schedulerOptions) {
+		o.extenders = e
+	}
+}
+
+// FrameworkCapturer is used for registering a notify function in building framework.
+type FrameworkCapturer func(schedulerapi.KubeSchedulerProfile)
+
+// WithBuildFrameworkCapturer sets a notify function for getting buildFramework details.
+func WithBuildFrameworkCapturer(fc FrameworkCapturer) Option {
+	return func(o *schedulerOptions) {
+		o.frameworkCapturer = fc
+	}
+}
+
+var defaultSchedulerOptions = schedulerOptions{
+	percentageOfNodesToScore:          schedulerapi.DefaultPercentageOfNodesToScore,
+	podInitialBackoffSeconds:          int64(internalqueue.DefaultPodInitialBackoffDuration.Seconds()),
+	podMaxBackoffSeconds:              int64(internalqueue.DefaultPodMaxBackoffDuration.Seconds()),
+	podMaxInUnschedulablePodsDuration: internalqueue.DefaultPodMaxInUnschedulablePodsDuration,
+	parallelism:                       int32(parallelize.DefaultParallelism),
+	// Ideally we would statically set the default profile here, but we can't because
+	// creating the default profile may require testing feature gates, which may get
+	// set dynamically in tests. Therefore, we delay creating it until New is actually
+	// invoked.
+	applyDefaultProfile: true,
+}
+
+// New returns a Scheduler
+func New(ctx context.Context,
+	client clientset.Interface,
+	informerFactory informers.SharedInformerFactory,
+	dynInformerFactory dynamicinformer.DynamicSharedInformerFactory,
+	recorderFactory profile.RecorderFactory,
+	opts ...Option) (*Scheduler, error) {
+
+	logger := klog.FromContext(ctx)
+	stopEverything := ctx.Done()
+
+	options := defaultSchedulerOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	if options.applyDefaultProfile {
+		var versionedCfg configv1.KubeSchedulerConfiguration
+		scheme.Scheme.Default(&versionedCfg)
+		cfg := schedulerapi.KubeSchedulerConfiguration{}
+		if err := scheme.Scheme.Convert(&versionedCfg, &cfg, nil); err != nil {
+			return nil, err
+		}
+		options.profiles = cfg.Profiles
+	}
+
+	registry := frameworkplugins.NewInTreeRegistry()
+	if err := registry.Merge(options.frameworkOutOfTreeRegistry); err != nil {
+		return nil, err
+	}
+
+	metrics.Register()
+
+	extenders, err := buildExtenders(logger, options.extenders, options.profiles)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't build extenders: %w", err)
+	}
+
+	podLister := informerFactory.Core().V1().Pods().Lister()
+	nodeLister := informerFactory.Core().V1().Nodes().Lister()
+
+	snapshot := internalcache.NewEmptySnapshot()
+	metricsRecorder := metrics.NewMetricsAsyncRecorder(1000, time.Second, stopEverything)
+
+	profiles, err := profile.NewMap(ctx, options.profiles, registry, recorderFactory,
+		frameworkruntime.WithComponentConfigVersion(options.componentConfigVersion),
+		frameworkruntime.WithClientSet(client),
+		frameworkruntime.WithKubeConfig(options.kubeConfig),
+		frameworkruntime.WithInformerFactory(informerFactory),
+		frameworkruntime.WithSnapshotSharedLister(snapshot),
+		frameworkruntime.WithCaptureProfile(frameworkruntime.CaptureProfile(options.frameworkCapturer)),
+		frameworkruntime.WithParallelism(int(options.parallelism)),
+		frameworkruntime.WithExtenders(extenders),
+		frameworkruntime.WithMetricsRecorder(metricsRecorder),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initializing profiles: %v", err)
+	}
+
+	if len(profiles) == 0 {
+		return nil, errors.New("at least one profile is required")
+	}
+
+	preEnqueuePluginMap := make(map[string][]framework.PreEnqueuePlugin)
+	queueingHintsPerProfile := make(internalqueue.QueueingHintMapPerProfile)
+	for profileName, profile := range profiles {
+		preEnqueuePluginMap[profileName] = profile.PreEnqueuePlugins()
+		queueingHintsPerProfile[profileName] = buildQueueingHintMap(profile.EnqueueExtensions())
+	}
+
+	podQueue := internalqueue.NewSchedulingQueue(
+		profiles[options.profiles[0].SchedulerName].QueueSortFunc(),
+		informerFactory,
+		internalqueue.WithPodInitialBackoffDuration(time.Duration(options.podInitialBackoffSeconds)*time.Second),
+		internalqueue.WithPodMaxBackoffDuration(time.Duration(options.podMaxBackoffSeconds)*time.Second),
+		internalqueue.WithPodLister(podLister),
+		internalqueue.WithPodMaxInUnschedulablePodsDuration(options.podMaxInUnschedulablePodsDuration),
+		internalqueue.WithPreEnqueuePluginMap(preEnqueuePluginMap),
+		internalqueue.WithQueueingHintMapPerProfile(queueingHintsPerProfile),
+		internalqueue.WithPluginMetricsSamplePercent(pluginMetricsSamplePercent),
+		internalqueue.WithMetricsRecorder(*metricsRecorder),
+	)
+
+	for _, fwk := range profiles {
+		fwk.SetPodNominator(podQueue)
+	}
+
+	schedulerCache := internalcache.New(ctx, durationToExpireAssumedPod)
+
+	// Setup cache debugger.
+	debugger := cachedebugger.New(nodeLister, podLister, schedulerCache, podQueue)
+	debugger.ListenForSignal(ctx)
+
+	sched := &Scheduler{
+		Cache:                    schedulerCache,
+		client:                   client,
+		nodeInfoSnapshot:         snapshot,
+		percentageOfNodesToScore: options.percentageOfNodesToScore,
+		Extenders:                extenders,
+		StopEverything:           stopEverything,
+		SchedulingQueue:          podQueue,
+		Profiles:                 profiles,
+		logger:                   logger,
+	}
+	sched.NextPod = podQueue.Pop
+	sched.applyDefaultHandlers()
+
+	if err = addAllEventHandlers(sched, informerFactory, dynInformerFactory, unionedGVKs(queueingHintsPerProfile)); err != nil {
+		return nil, fmt.Errorf("adding event handlers: %w", err)
+	}
+
+	return sched, nil
+}
+
+// defaultQueueingHintFn is the default queueing hint function.
+// It always returns Queue as the queueing hint.
+var defaultQueueingHintFn = func(_ klog.Logger, _ *v1.Pod, _, _ interface{}) (framework.QueueingHint, error) {
+	return framework.Queue, nil
+}
+
+func buildQueueingHintMap(es []framework.EnqueueExtensions) internalqueue.QueueingHintMap {
+	queueingHintMap := make(internalqueue.QueueingHintMap)
+	for _, e := range es {
+		events := e.EventsToRegister()
+
+		// This will happen when plugin registers with empty events, it's usually the case a pod
+		// will become reschedulable only for self-update, e.g. schedulingGates plugin, the pod
+		// will enter into the activeQ via priorityQueue.Update().
+		if len(events) == 0 {
+			continue
+		}
+
+		// Note: Rarely, a plugin implements EnqueueExtensions but returns nil.
+		// We treat it as: the plugin is not interested in any event, and hence pod failed by that plugin
+		// cannot be moved by any regular cluster event.
+		// So, we can just ignore such EventsToRegister here.
+
+		registerNodeAdded := false
+		registerNodeTaintUpdated := false
+		for _, event := range events {
+			fn := event.QueueingHintFn
+			if fn == nil || !utilfeature.DefaultFeatureGate.Enabled(features.SchedulerQueueingHints) {
+				fn = defaultQueueingHintFn
+			}
+
+			if event.Event.Resource == framework.Node {
+				if event.Event.ActionType&framework.Add != 0 {
+					registerNodeAdded = true
+				}
+				if event.Event.ActionType&framework.UpdateNodeTaint != 0 {
+					registerNodeTaintUpdated = true
+				}
+			}
+
+			queueingHintMap[event.Event] = append(queueingHintMap[event.Event], &internalqueue.QueueingHintFunction{
+				PluginName:     e.Name(),
+				QueueingHintFn: fn,
+			})
+		}
+		if registerNodeAdded && !registerNodeTaintUpdated {
+			// Temporally fix for the issue https://github.com/kubernetes/kubernetes/issues/109437
+			// NodeAdded QueueingHint isn't always called because of preCheck.
+			// It's definitely not something expected for plugin developers,
+			// and registering UpdateNodeTaint event is the only mitigation for now.
+			//
+			// So, here registers UpdateNodeTaint event for plugins that has NodeAdded event, but don't have UpdateNodeTaint event.
+			// It has a bad impact for the requeuing efficiency though, a lot better than some Pods being stuch in the
+			// unschedulable pod pool.
+			// This behavior will be removed when we remove the preCheck feature.
+			// See: https://github.com/kubernetes/kubernetes/issues/110175
+			queueingHintMap[framework.ClusterEvent{Resource: framework.Node, ActionType: framework.UpdateNodeTaint}] =
+				append(queueingHintMap[framework.ClusterEvent{Resource: framework.Node, ActionType: framework.UpdateNodeTaint}],
+					&internalqueue.QueueingHintFunction{
+						PluginName:     e.Name(),
+						QueueingHintFn: defaultQueueingHintFn,
+					},
+				)
+		}
+	}
+	return queueingHintMap
+}
+
+// Run begins watching and scheduling. It starts scheduling and blocked until the context is done.
+func (sched *Scheduler) Run(ctx context.Context) {
+	logger := klog.FromContext(ctx)
+	sched.SchedulingQueue.Run(logger)
+
+	// We need to start scheduleOne loop in a dedicated goroutine,
+	// because scheduleOne function hangs on getting the next item
+	// from the SchedulingQueue.
+	// If there are no new pods to schedule, it will be hanging there
+	// and if done in this goroutine it will be blocking closing
+	// SchedulingQueue, in effect causing a deadlock on shutdown.
+	go wait.UntilWithContext(ctx, sched.ScheduleOne, 0)
+
+	<-ctx.Done()
+	sched.SchedulingQueue.Close()
+
+	// If the plugins satisfy the io.Closer interface, they are closed.
+	err := sched.Profiles.Close()
+	if err != nil {
+		logger.Error(err, "Failed to close plugins")
+	}
+}
+
+// NewInformerFactory creates a SharedInformerFactory and initializes a scheduler specific
+// in-place podInformer.
+func NewInformerFactory(cs clientset.Interface, resyncPeriod time.Duration) informers.SharedInformerFactory {
+	informerFactory := informers.NewSharedInformerFactory(cs, resyncPeriod)
+	informerFactory.InformerFor(&v1.Pod{}, newPodInformer)
+	return informerFactory
+}
+
+func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profiles []schedulerapi.KubeSchedulerProfile) ([]framework.Extender, error) {
+	var fExtenders []framework.Extender
+	if len(extenders) == 0 {
+		return nil, nil
+	}
+
+	var ignoredExtendedResources []string
+	var ignorableExtenders []framework.Extender
+	for i := range extenders {
+		logger.V(2).Info("Creating extender", "extender", extenders[i])
+		extender, err := NewHTTPExtender(&extenders[i])
+		if err != nil {
+			return nil, err
+		}
+		if !extender.IsIgnorable() {
+			fExtenders = append(fExtenders, extender)
+		} else {
+			ignorableExtenders = append(ignorableExtenders, extender)
+		}
+		for _, r := range extenders[i].ManagedResources {
+			if r.IgnoredByScheduler {
+				ignoredExtendedResources = append(ignoredExtendedResources, r.Name)
+			}
+		}
+	}
+	// place ignorable extenders to the tail of extenders
+	fExtenders = append(fExtenders, ignorableExtenders...)
+
+	// If there are any extended resources found from the Extenders, append them to the pluginConfig for each profile.
+	// This should only have an effect on ComponentConfig, where it is possible to configure Extenders and
+	// plugin args (and in which case the extender ignored resources take precedence).
+	if len(ignoredExtendedResources) == 0 {
+		return fExtenders, nil
+	}
+
+	for i := range profiles {
+		prof := &profiles[i]
+		var found = false
+		for k := range prof.PluginConfig {
+			if prof.PluginConfig[k].Name == noderesources.Name {
+				// Update the existing args
+				pc := &prof.PluginConfig[k]
+				args, ok := pc.Args.(*schedulerapi.NodeResourcesFitArgs)
+				if !ok {
+					return nil, fmt.Errorf("want args to be of type NodeResourcesFitArgs, got %T", pc.Args)
+				}
+				args.IgnoredResources = ignoredExtendedResources
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("can't find NodeResourcesFitArgs in plugin config")
+		}
+	}
+	return fExtenders, nil
+}
+
+type FailureHandlerFn func(ctx context.Context, fwk framework.Framework, podInfo *framework.QueuedPodInfo, status *framework.Status, nominatingInfo *framework.NominatingInfo, start time.Time)
+
+func unionedGVKs(queueingHintsPerProfile internalqueue.QueueingHintMapPerProfile) map[framework.GVK]framework.ActionType {
+	gvkMap := make(map[framework.GVK]framework.ActionType)
+	for _, queueingHints := range queueingHintsPerProfile {
+		for evt := range queueingHints {
+			if _, ok := gvkMap[evt.Resource]; ok {
+				gvkMap[evt.Resource] |= evt.ActionType
+			} else {
+				gvkMap[evt.Resource] = evt.ActionType
+			}
+		}
+	}
+	return gvkMap
+}
+
+// newPodInformer creates a shared index informer that returns only non-terminal pods.
+// The PodInformer allows indexers to be added, but note that only non-conflict indexers are allowed.
+func newPodInformer(cs clientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	selector := fmt.Sprintf("status.phase!=%v,status.phase!=%v", v1.PodSucceeded, v1.PodFailed)
+	tweakListOptions := func(options *metav1.ListOptions) {
+		options.FieldSelector = selector
+	}
+	informer := coreinformers.NewFilteredPodInformer(cs, metav1.NamespaceAll, resyncPeriod, cache.Indexers{}, tweakListOptions)
+
+	// Dropping `.metadata.managedFields` to improve memory usage.
+	// The Extract workflow (i.e. `ExtractPod`) should be unused.
+	trim := func(obj interface{}) (interface{}, error) {
+		if accessor, err := meta.Accessor(obj); err == nil {
+			if accessor.GetManagedFields() != nil {
+				accessor.SetManagedFields(nil)
+			}
+		}
+		return obj, nil
+	}
+	informer.SetTransform(trim)
+	return informer
 }
