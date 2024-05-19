@@ -244,12 +244,18 @@ func WithExtenders(e ...schedulerapi.Extender) Option {
 // FrameworkCapturer is used for registering a notify function in building framework.
 type FrameworkCapturer func(schedulerapi.KubeSchedulerProfile)
 
+##	该函数提供了一个接口，开发者可以通过这个接口捕获到调度框架的构建过程中的重要信息或状态变更。
+
 // WithBuildFrameworkCapturer sets a notify function for getting buildFramework details.
 func WithBuildFrameworkCapturer(fc FrameworkCapturer) Option {
 	return func(o *schedulerOptions) {
 		o.frameworkCapturer = fc
 	}
 }
+
+##	该函数同样是一个option函数，指向schedulerOption实例的中的FrameworkCapturer，可以使用户在scheduler建立的过程中添加特殊的操作。
+##	注意：这里的操作包括增加日志输出与捕获实时状态等，但是不包括修改调度器的调度逻辑，那个需要通过extenders进行修改
+
 
 var defaultSchedulerOptions = schedulerOptions{
 	percentageOfNodesToScore:          schedulerapi.DefaultPercentageOfNodesToScore,
@@ -264,21 +270,35 @@ var defaultSchedulerOptions = schedulerOptions{
 	applyDefaultProfile: true,
 }
 
+##	这里定义了用户在没有客制化需求时，调度器的默认配置
+##	注意：这里构建的调度器并非是可以运行的实体，如果需要创建可以运行在集群的调度器还需要更多的设定
+##	至于具体还需要什么设定，可以参照下面的函数：
+
 // New returns a Scheduler
-func New(ctx context.Context,
-	client clientset.Interface,
-	informerFactory informers.SharedInformerFactory,
-	dynInformerFactory dynamicinformer.DynamicSharedInformerFactory,
-	recorderFactory profile.RecorderFactory,
-	opts ...Option) (*Scheduler, error) {
++{
+
+	##	如前文所说，这个函数负责构筑一个调度器实体
 
 	logger := klog.FromContext(ctx)
+	##	从集群的上下文中获取日志记录器，用于记录调度器的操作和事件。
+
 	stopEverything := ctx.Done()
+	##	检测停止通道，用以处理停止信号
 
 	options := defaultSchedulerOptions
 	for _, opt := range opts {
 		opt(&options)
 	}
+
+	##	这里使用Option函数与循环的结合，获取了defaultSchedulerOptions中的所有变量的初始状态
+	##	接着使用opt在option上应用修改
+	##	用户可以通过这个方式实现对defaultSchedulerOptions中变量的客制化
+	##	注意，这里并不会修改defaultSchedulerOptions本身，只会修改一个副本
+	##	虽然在源代码中没有对defaultSchedulerOptions中的参数进行直接的修改
+	##	但是由于defaultSchedulerOptions中的参数也通过option函数与SchedulerOptions实例相连
+	##	而对SchedulerOptions实例进行客制化的Option函数实际存在
+	##	所以这里才会没有与defaultSchedulerOptions直接相连的Option函数
+
 
 	if options.applyDefaultProfile {
 		var versionedCfg configv1.KubeSchedulerConfiguration
@@ -289,6 +309,9 @@ func New(ctx context.Context,
 		}
 		options.profiles = cfg.Profiles
 	}
+
+	##	这个函数负责加载和应用 Kubernetes 调度器的默认配置文件
+	##	如果需要客制化调度器，这里的相关内容就不会被使用到
 
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.frameworkOutOfTreeRegistry); err != nil {
