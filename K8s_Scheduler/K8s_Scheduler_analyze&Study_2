@@ -1,0 +1,103 @@
+##  这里是在cmd/kube-scheduler/app/server.go 中的setup函数  ##
+##  这里实际演示了如何在K8s集群中定义一个调度器                     ##
+
+…………
+
+func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Option) error {
+	verflag.PrintAndExitIfRequested()
+
+	// Activate logging as soon as possible, after that
+	// show flags with the final logging configuration.
+	if err := logsapi.ValidateAndApply(opts.Logs, utilfeature.DefaultFeatureGate); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	cliflag.PrintFlags(cmd.Flags())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		stopCh := server.SetupSignalHandler()
+		<-stopCh
+		cancel()
+	}()
+
+################################################################
+
+	cc, sched, err := Setup(ctx, opts, registryOptions...)
+	if err != nil {
+		return err
+	}
+
+##  这个部分实际设置并初始化 Kubernetes 调度器的实例
+##  具体内容可以看后续
+
+################################################################
+	utilfeature.DefaultMutableFeatureGate.AddMetrics()
+	return Run(ctx, cc, sched)
+}
+
+…………
+
+func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions ...Option) (*schedulerserverconfig.CompletedConfig, *scheduler.Scheduler, error) {
+	if cfg, err := latest.Default(); err != nil {
+		return nil, nil, err
+	} else {
+		opts.ComponentConfig = cfg
+	}
+
+	if errs := opts.Validate(); len(errs) > 0 {
+		return nil, nil, utilerrors.NewAggregate(errs)
+	}
+  ##这部分初始化了 client, EventBroadcaster,PodInformer,InformerFactory 并通过 config 回传。
+
+	c, err := opts.Config(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+  
+	cc := c.Complete()
+  ##  获取完整的设置
+
+	outOfTreeRegistry := make(runtime.Registry)
+	for _, option := range outOfTreeRegistryOptions {
+		if err := option(outOfTreeRegistry); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	recorderFactory := getRecorderFactory(&cc)
+	completedProfiles := make([]kubeschedulerconfig.KubeSchedulerProfile, 0)
+
+  ##  下面开始建立一个scheduler实体
+  ##  这里就会调用 pkg/scheduler/scheduler.go 中的new函数
+	sched, err := scheduler.New(ctx,
+		cc.Client,
+		cc.InformerFactory,
+		cc.DynInformerFactory,
+		recorderFactory,
+		scheduler.WithComponentConfigVersion(cc.ComponentConfig.TypeMeta.APIVersion),
+		scheduler.WithKubeConfig(cc.KubeConfig),
+		scheduler.WithProfiles(cc.ComponentConfig.Profiles...),
+		scheduler.WithPercentageOfNodesToScore(cc.ComponentConfig.PercentageOfNodesToScore),
+		scheduler.WithFrameworkOutOfTreeRegistry(outOfTreeRegistry),
+		scheduler.WithPodMaxBackoffSeconds(cc.ComponentConfig.PodMaxBackoffSeconds),
+		scheduler.WithPodInitialBackoffSeconds(cc.ComponentConfig.PodInitialBackoffSeconds),
+		scheduler.WithPodMaxInUnschedulablePodsDuration(cc.PodMaxInUnschedulablePodsDuration),
+		scheduler.WithExtenders(cc.ComponentConfig.Extenders...),
+		scheduler.WithParallelism(cc.ComponentConfig.Parallelism),
+		scheduler.WithBuildFrameworkCapturer(func(profile kubeschedulerconfig.KubeSchedulerProfile) {
+			// Profiles are processed during Framework instantiation to set default plugins and configurations. Capturing them for logging
+			completedProfiles = append(completedProfiles, profile)
+		}),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := options.LogOrWriteConfig(klog.FromContext(ctx), opts.WriteConfigTo, &cc.ComponentConfig, completedProfiles); err != nil {
+		return nil, nil, err
+	}
+
+	return &cc, sched, nil
+}
