@@ -442,7 +442,7 @@ func New(ctx context.Context,
 	##	Pod Nominator 是一个组件，负责记录和管理在调度过程中可能需要被重新调度的 Pods。
 
 	schedulerCache := internalcache.New(ctx, durationToExpireAssumedPod)
-
+	
 	##	初始化调度器缓存，它负责管理 Pods 和节点信息，并提供了一个Pod 过期机制
 	##	durationToExpireAssumedPod 指定了一个Pod在缓存中可以存在的最大时长
 	##	如果这段时间内 Pod 没有被绑定到任何一个节点，则它会从缓存中过期并被移除。
