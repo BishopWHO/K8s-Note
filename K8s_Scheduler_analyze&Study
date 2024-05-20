@@ -320,16 +320,39 @@ var defaultSchedulerOptions = schedulerOptions{
 
 	metrics.Register()
 
+	##	这里创建一个新的插件注册表，里面整合了所有来自内部（来自frameworkplugins.NewInTreeRegistry）
+	##	与外部的插件（来自registry.Merge(options.frameworkOutOfTreeRegistry)）
+	##	接着使用metrics.Register()注册了一组调度器的运行时监控指标，，用以确认所有插件的工作性能
+
+
 	extenders, err := buildExtenders(logger, options.extenders, options.profiles)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't build extenders: %w", err)
 	}
 
+	##	拓展器设置，可以通过这里导入一个自定义的外部调度器
+	##	这里接入的外部调度器不需要修改原本的调度逻辑
+	##	如果接入出现问题也会报错
+
 	podLister := informerFactory.Core().V1().Pods().Lister()
 	nodeLister := informerFactory.Core().V1().Nodes().Lister()
 
+	##	这两个Lister负责从本地缓存中检索所有 Pod 和 Node 的信息。
+	##	这些缓存会一直检索所有 Pod 和 Node 的更新信息并自动更新，以保证数据的时效性和准确性
+	##	而调度器访问这些信息不需要通过API，能够加快调度器的效率
+
 	snapshot := internalcache.NewEmptySnapshot()
+
+	##	这里创建了一组创建了一个新的空的快照对象
+	##	里面储存了所有节点的信息以及这些节点上的 Pod 分布情况
+	##	这个快照也会在一个调度周期后进行更新，可以帮助调度器做出决策
+
+
 	metricsRecorder := metrics.NewMetricsAsyncRecorder(1000, time.Second, stopEverything)
+
+	##	这里创建了一个新的记录器，用于监控调度器的性能
+	##	可以根据这些指标优化调度器的性能
+
 
 	profiles, err := profile.NewMap(ctx, options.profiles, registry, recorderFactory,
 		frameworkruntime.WithComponentConfigVersion(options.componentConfigVersion),
@@ -350,16 +373,38 @@ var defaultSchedulerOptions = schedulerOptions{
 		return nil, errors.New("at least one profile is required")
 	}
 
+	##	这里调用一个名为profile的实体中的NewMap的函数，为调度器映射了一些基础设置
+	##	其中包含了调度器的多个配置文件（profiles）。
+	##	这些配置文件包含了调度器运行所必需的各种调度策略和规则。
+	##	如果这些参数的映像设置成功，将返回一个充满有效调度配置文件的 profiles 映射，err就是nil。
+	##	如果初始化结束都没有任何配置文件，调度器无法正常工作
+	##	会返回错误信息"at least one profile is required"
+
 	preEnqueuePluginMap := make(map[string][]framework.PreEnqueuePlugin)
+
+	##	这里创建了一个映射，键值为配置文件名（profile name），值为实现了 PreEnqueuePlugin 接口的插件列表。
+	##	这个接口的插件在 Pod 进入调度队列之前执行
+	##	负责入队前的合规性和适用性检查，确保只有合适的 Pods 能够进入调度过程。
+
 	queueingHintsPerProfile := make(internalqueue.QueueingHintMapPerProfile)
+
+	##	这里创建了另一个映射，用于存储每个配置文件对应的队列提示。
+	##	里面包含从插件生成的提示信息，这些信息指导调度器如何处理队列操作。
+	##	可以根据当前集群状态、Pods 的特定特征或优先级来调整其入队行为。
+
+
 	for profileName, profile := range profiles {
 		preEnqueuePluginMap[profileName] = profile.PreEnqueuePlugins()
 		queueingHintsPerProfile[profileName] = buildQueueingHintMap(profile.EnqueueExtensions())
 	}
 
+	##	这里使用遍历为每个profile设置之前两个负责Pod调度的映射
+
 	podQueue := internalqueue.NewSchedulingQueue(
 		profiles[options.profiles[0].SchedulerName].QueueSortFunc(),
+		##	从首个配置文件中获取队列的排序函数
 		informerFactory,
+		##	传递 用于创建和管理 Kubernetes 资源的 Informer Factory
 		internalqueue.WithPodInitialBackoffDuration(time.Duration(options.podInitialBackoffSeconds)*time.Second),
 		internalqueue.WithPodMaxBackoffDuration(time.Duration(options.podMaxBackoffSeconds)*time.Second),
 		internalqueue.WithPodLister(podLister),
@@ -368,17 +413,34 @@ var defaultSchedulerOptions = schedulerOptions{
 		internalqueue.WithQueueingHintMapPerProfile(queueingHintsPerProfile),
 		internalqueue.WithPluginMetricsSamplePercent(pluginMetricsSamplePercent),
 		internalqueue.WithMetricsRecorder(*metricsRecorder),
+		##	这些配置项在前文的程序中都有过调用，它们完善了PodQueue的功能
 	)
+
+	##	这里设置了调度队列，是调度器的重要组件之一
+	##	内容包括管理等待被调度的 Pods，包括如何排序、如何处理无法立即调度的 Pods，以及如何反馈调度尝试的结果。
 
 	for _, fwk := range profiles {
 		fwk.SetPodNominator(podQueue)
 	}
 
+	##	这里将所有的PodQueue与profile结合起来
+	##	确保每个调度配置文件能够正确地访问和操作调度队列。
+	##	SetPodNominator 方法允许每个调度框架通过提供的 podQueue 访问和管理 Pods 的队列与提名。
+	##	Pod Nominator 是一个组件，负责记录和管理在调度过程中可能需要被重新调度的 Pods。
+
 	schedulerCache := internalcache.New(ctx, durationToExpireAssumedPod)
+
+	##	初始化调度器缓存，它负责管理 Pods 和节点信息，并提供了一个Pod 过期机制
+	##	durationToExpireAssumedPod 指定了一个Pod在缓存中可以存在的最大时长
+	##	如果这段时间内 Pod 没有被绑定到任何一个节点，则它会从缓存中过期并被移除。
 
 	// Setup cache debugger.
 	debugger := cachedebugger.New(nodeLister, podLister, schedulerCache, podQueue)
 	debugger.ListenForSignal(ctx)
+
+	##	设置一个缓存调试器，负责监控刚才设置的schedulerCache
+	##	同时其中还集成了对节点和 Pods 的监控
+	##	可以通过 nodeLister 和 podLister 能够访问最新的集群数据
 
 	sched := &Scheduler{
 		Cache:                    schedulerCache,
@@ -391,21 +453,44 @@ var defaultSchedulerOptions = schedulerOptions{
 		Profiles:                 profiles,
 		logger:                   logger,
 	}
+
+	##	这段代码使用了前文提供的功能函数创建和配置一个 Scheduler 实体
+
 	sched.NextPod = podQueue.Pop
+	
+	##	这里设置了调度器选择下一个Pod的方法为podQueue.Pop
+	##	这个方法是按照排序顺序依次读取Pod，适用面很广
+	
 	sched.applyDefaultHandlers()
+
+	##	这里设置了一些默认的处理方法
+	##	例如当一个 Pod 无法被成功调度，一个默认的处理程序可能会尝试将 Pod 重新加入到调度队列，或记录相关的错误信息。
 
 	if err = addAllEventHandlers(sched, informerFactory, dynInformerFactory, unionedGVKs(queueingHintsPerProfile)); err != nil {
 		return nil, fmt.Errorf("adding event handlers: %w", err)
 	}
 
+	##	这个函数首先使用 addAllEventHandlers 为调度器 (sched) 添加各种事件处理器
+	##	这些处理器使用基于 informerFactory 和 dynInformerFactory 创建的 Informers 监听 Kubernetes 资源的变化
+	##	接着程序会立即检查函数调用的结果是否返回错误，如果存在错误则会返回错误信息
+
+	##	这样确保了只有在所有事件处理器成功添加之后，调度器才会继续执行后续操作
+
 	return sched, nil
 }
+
+
 
 // defaultQueueingHintFn is the default queueing hint function.
 // It always returns Queue as the queueing hint.
 var defaultQueueingHintFn = func(_ klog.Logger, _ *v1.Pod, _, _ interface{}) (framework.QueueingHint, error) {
 	return framework.Queue, nil
 }
+
+##	这是 K8s 调度器中的一个默认队列提示函数
+##	作用是提供一个基础的队列提示，指导调度器如何将 Pods 排入调度队列
+##	似乎无论Pod与节点是什么情况，Pod都会以一个固定顺序进行调度
+##	我猜想这是用于处理PodQueue无法处理的Pod，将那些Pod强制绑定上节点进行执行
 
 func buildQueueingHintMap(es []framework.EnqueueExtensions) internalqueue.QueueingHintMap {
 	queueingHintMap := make(internalqueue.QueueingHintMap)
@@ -469,6 +554,10 @@ func buildQueueingHintMap(es []framework.EnqueueExtensions) internalqueue.Queuei
 	return queueingHintMap
 }
 
+##	这里设置了一个buildQueueingHintMap 函数，建立事件与队列提示函数的映射
+##	负责根据集群事件实时处理新加入PodQueue（调度队列）的 Pod 的处理方式
+##	也可以动态响应集群中的变化，如节点的添加或更新，从而更智能地管理待调度的 Pods。
+
 // Run begins watching and scheduling. It starts scheduling and blocked until the context is done.
 func (sched *Scheduler) Run(ctx context.Context) {
 	logger := klog.FromContext(ctx)
@@ -492,6 +581,10 @@ func (sched *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+##	这段代码定义了 Kubernetes 调度器的 Run 方法，该方法负责启动调度器并管理其整个生命周期
+##	这个方法包括启动调度队列、处理调度逻辑，以及正确地处理调度器停止时的清理工作。
+
+
 // NewInformerFactory creates a SharedInformerFactory and initializes a scheduler specific
 // in-place podInformer.
 func NewInformerFactory(cs clientset.Interface, resyncPeriod time.Duration) informers.SharedInformerFactory {
@@ -500,14 +593,23 @@ func NewInformerFactory(cs clientset.Interface, resyncPeriod time.Duration) info
 	return informerFactory
 }
 
+##	这段代码定义了一个名为 NewInformerFactory 的函数，创建一个 SharedInformerFactory 实例 
+##	用于创建和管理 Informer。并使用这些Informer用来监听 Kubernetes API 服务器上资源状态变化。
+##	并设置一个直接在调度器中初始化和配置的podInformer
+##	这是一种特定类型的 Informer，专门用于监控和响应与 Pod 相关的事件
+
 func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profiles []schedulerapi.KubeSchedulerProfile) ([]framework.Extender, error) {
 	var fExtenders []framework.Extender
 	if len(extenders) == 0 {
 		return nil, nil
 	}
 
+	##	这里首先检查了extenders 列表是否为空
+	##	如果为空则表示示没有扩展器要处理
+
 	var ignoredExtendedResources []string
 	var ignorableExtenders []framework.Extender
+
 	for i := range extenders {
 		logger.V(2).Info("Creating extender", "extender", extenders[i])
 		extender, err := NewHTTPExtender(&extenders[i])
@@ -525,15 +627,23 @@ func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profi
 			}
 		}
 	}
-	// place ignorable extenders to the tail of extenders
+
+	##	这里遍历了所有拓展调度器，将它们分为可忽略与不可忽略的两类
+	##	可忽略类的在调度过程中如果非必要可以不使用，会做上ignorableExtenders的标志
+	##	不可忽略则是必须在调度过程中使用
+	##	接着将所有带有ignorableExtenders标签的调度器都会被放入ignoredExtendedResources数组
+	##	这些数组内的调度器将不会影响调度器的最终结果
+
 	fExtenders = append(fExtenders, ignorableExtenders...)
 
-	// If there are any extended resources found from the Extenders, append them to the pluginConfig for each profile.
-	// This should only have an effect on ComponentConfig, where it is possible to configure Extenders and
-	// plugin args (and in which case the extender ignored resources take precedence).
+	##	这里是一个append函数
+	##	作用是将所有的 ignorableExtenders 放置到 fExtenders 的末尾
+
 	if len(ignoredExtendedResources) == 0 {
 		return fExtenders, nil
 	}
+
+	##	如果没有可以被忽略的调度器，程序会直接返回不可忽略
 
 	for i := range profiles {
 		prof := &profiles[i]
@@ -554,11 +664,43 @@ func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profi
 		if !found {
 			return nil, fmt.Errorf("can't find NodeResourcesFitArgs in plugin config")
 		}
+
+	##	如果有可忽略的拓展调度器，遍历所有的调度配置文件
+	##	如果找到含有NodeResourcesFit插件的配置文件，会将可忽略的拓展调度器包含其中
+	##	反之，如果无法找到相应插件或者拓展调度器的格式错误，程序会报错
+
+	##	NodeResourcesFit 插件的主要功能是检查节点的资源是否满足 Pod 的需求。
+	##	它通过比较 Pod 请求的资源和节点上可用的资源来决定一个节点是否适合该 Pod。
+	##	这样可以确保调度器在不使用拓展调度器的情况下，也能对 Pod 进行节点选择
+
+	##	不讲不可忽略调度器放置入NodeResourcesFit的原因
+	##	NodeResourcesFit负责评估大部分情况下调度器对节点资源的打分
+	##	不可忽略的拓展调度器往往负责特殊情况，放入NodeResourcesFit会导致增加消耗
+	##	作为独立插件接入调度器也更方便对于这些不可忽略的拓展调度器进行配置与维护
+	
 	}
 	return fExtenders, nil
 }
 
+##	这里便是扩展器的具体实现方法
+
+
 type FailureHandlerFn func(ctx context.Context, fwk framework.Framework, podInfo *framework.QueuedPodInfo, status *framework.Status, nominatingInfo *framework.NominatingInfo, start time.Time)
+
+##	FailureHandlerFn指定了在调度失败时应该执行的回调函数的格式
+##	用于处理那些由于各种原因未能成功调度到节点上的 Pods。
+##	ctx context.Context：
+##	用于传递跨 API 边界和进程间的请求范围的元数据、取消信号以及截止时间。在调度的上下文中，它允许这些函数响应取消信号，优雅地中断处理过程。
+##	fwk framework.Framework：
+##	表示调度器框架的接口，提供了访问调度器内部操作的方法，如获取调度器的配置、调用特定的插件等。通过这个接口，失败处理函数可以利用调度器框架提供的工具和功能。
+##	podInfo framework.QueuedPodInfo：
+##	包含了队列中 Pod 的信息的结构体，如 Pod 的元数据和状态。这个信息用于帮助诊断为什么 Pod 调度失败，并可能被用来决定后续的重试或其他补救措施。
+##	status framework.Status：
+##	表示调度尝试结果的结构体。它包括了调度失败的原因、错误代码等详细信息。这些信息对于决定如何处理调度失败至关重要。
+##	nominatingInfo framework.NominatingInfo：
+##	包含了可能会影响 Pod 调度决策的额外信息，如推荐的节点或调度时考虑的特定细节。这允许失败处理逻辑根据调度时的情况来做出更精细的决策。
+##	start time.Time：
+##	记录了调度尝试开始的时间。这可以用于计算调度尝试耗费的时间，分析性能问题或确定调度超时。
 
 func unionedGVKs(queueingHintsPerProfile internalqueue.QueueingHintMapPerProfile) map[framework.GVK]framework.ActionType {
 	gvkMap := make(map[framework.GVK]framework.ActionType)
@@ -573,6 +715,9 @@ func unionedGVKs(queueingHintsPerProfile internalqueue.QueueingHintMapPerProfile
 	}
 	return gvkMap
 }
+
+##	这个程序会返回一个包含所有资源类型和相应动作类型的映射。
+##	集群会更具这个映射来配置调度器，使其知道在哪些事件发生时需要重新考虑队列中的 Pods。
 
 // newPodInformer creates a shared index informer that returns only non-terminal pods.
 // The PodInformer allows indexers to be added, but note that only non-conflict indexers are allowed.
@@ -596,3 +741,6 @@ func newPodInformer(cs clientset.Interface, resyncPeriod time.Duration) cache.Sh
 	informer.SetTransform(trim)
 	return informer
 }
+
+##	这个函数会创建一个用于监控 Pod 状态的Informer
+##	调度器会使用这个 Informer 来监听 Pod 状态的变化，以便于实时做出调度决策
