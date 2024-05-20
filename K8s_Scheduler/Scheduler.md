@@ -1,3 +1,3 @@
 K8sスケジューラのアーキテクチャ
 
-![アーキテクチャ](images/logo.png)
+![アーキテクチャ](Pic/K8s_Scheduler-Architecture.png)
