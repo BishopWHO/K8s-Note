@@ -275,7 +275,13 @@ var defaultSchedulerOptions = schedulerOptions{
 ##	至于具体还需要什么设定，可以参照下面的函数：
 
 // New returns a Scheduler
-+{
+
+func New(ctx context.Context,
+	client clientset.Interface,
+	informerFactory informers.SharedInformerFactory,
+	dynInformerFactory dynamicinformer.DynamicSharedInformerFactory,
+	recorderFactory profile.RecorderFactory,
+	opts ...Option) (*Scheduler, error) {
 
 	##	如前文所说，这个函数负责构筑一个调度器实体
 
