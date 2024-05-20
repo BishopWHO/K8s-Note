@@ -371,6 +371,12 @@ func New(ctx context.Context,
 		frameworkruntime.WithExtenders(extenders),
 		frameworkruntime.WithMetricsRecorder(metricsRecorder),
 	)
+
+	##	在初始化 scheduler 时，会创建一个 profile，profile是关于 scheduler 调度配置相关的定义
+	##	关于 profile 的实现，它作为 KubeSchedulerProfile，也就是在调度器生成时作为 yaml 传入的配置
+	##	profile.NewMap 就是根据给定的配置来构建framework，因为配置可能是同时存在多个
+
+
 	if err != nil {
 		return nil, fmt.Errorf("initializing profiles: %v", err)
 	}
