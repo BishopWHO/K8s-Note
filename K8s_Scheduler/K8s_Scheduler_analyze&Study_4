@@ -1,1 +1,84 @@
+func (sched *Scheduler) scheduleOne(ctx context.Context) {
+    podInfo := sched.NextPod()
 
+    ## 从调度队列中获取下一个待调度的 Pod。
+    ## スケジュールキューから次のスケジュール待ちのPodを取得します。
+
+    // pod could be nil when schedulerQueue is closed
+    if podInfo == nil || podInfo.Pod == nil {
+        return
+    }
+
+    ## 如果队列被关闭，或者获取不到新的 Pod 信息，则直接返回。
+    ## キューが閉じている場合、または取得したPod情報がnullの場合は、直接リターンします。
+
+    pod := podInfo.Pod
+    fwk, err := sched.frameworkForPod(pod)
+
+    ## 获取该 Pod 的调度框架。
+    ## そのPodのスケジューリングフレームワークを取得します。
+
+    if err != nil {
+
+        ## 如果无法获取相应调度框架，记录错误并返回。
+        ## スケジューリングフレームワークの取得に失敗した場合、エラーを記録してリターンします。
+
+        klog.ErrorS(err, "Error occurred")
+        return
+    }
+    if sched.skipPodSchedule(fwk, pod) {
+
+        ## 检查这个 Pod 的调度是否应该跳过。
+        ## このPodのスケジュールをスキップするかどうかをチェックします。
+
+        return
+    }
+
+    klog.V(3).InfoS("Attempting to schedule pod", "pod", klog.KObj(pod))
+
+    ## 记录正在尝试进行调度的 Pod。
+    ## スケジュールを試みているPodを記録します。
+
+    // Synchronously attempt to find a fit for the pod.
+    start := time.Now()
+
+    ## 同步尝试为 Pod 找到合适的节点。
+    ## 同期的にPodに適合するノードを見つけることを試みます。
+
+    state := framework.NewCycleState()
+
+    ## 创建一个新的调度周期状态。
+    ## 新しいスケジューリングサイクルの状態を作成します。
+
+    state.SetRecordPluginMetrics(rand.Intn(100) < pluginMetricsSamplePercent)
+
+    ## 根据设定的百分比记录插件的度量信息。
+    ## 設定されたパーセンテージに基づいてプラグインのメトリック情報を記録します。
+
+    // Initialize an empty podsToActivate struct, which will be filled up by plugins or stay empty.
+    podsToActivate := framework.NewPodsToActivate()
+
+    ## 初始化一个空的 podsToActivate 结构，这个结构应该由插件填充或保持空状态。
+    ## 空のpodsToActivate構造体を初期化します。これはプラグインによって埋められるか、空のままになります。
+
+    state.Write(framework.PodsToActivateKey, podsToActivate)
+
+    ## 将 podsToActivate 写入状态中。
+    ## podsToActivateを状態に書き込みます。
+
+    schedulingCycleCtx, cancel := context.WithCancel(ctx)
+    defer cancel()
+
+    ## 创建一个可取消的调度周期上下文，并确保在函数结束时这个上下文会被取消。
+    ## キャンセル可能なスケジューリングサイクルコンテキストを作成し、関数終了時にそれをキャンセルするようにします。
+
+    scheduleResult, err := sched.SchedulePod(schedulingCycleCtx, fwk, state, pod)
+
+    ## 尝试调度 Pod，并获取调度结果。
+    ## Podをスケジュールし、スケジュール結果を取得します。
+
+    if err != nil {
+
+        ## 如果调度失败，处理调度失败的逻辑。
+        ## スケジュールに失敗した場合、スケジュール失敗のロジックを処理します。
+    }
