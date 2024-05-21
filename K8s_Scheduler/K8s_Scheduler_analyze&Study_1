@@ -1,30 +1,48 @@
 ##	这部分是来自于PKG的调度器源代码	##
 ##	更多是对于结构的模板化定义	##
 
+## この部分は PKG のスケジューラ の ソース コード 	  ##
+## 内容ほとんどはテンプレート化された構造定義		  ##
+
 type Scheduler struct {
 
 ##  这里定义了一个Scheduler结构体，用以对调度器进行初始化定义，也就是为调度器提供框架
+##　ここでは、Scheduler structを定義して、スケジューラを初期化します。つまり、スケジューラにフレームワークを提供します。
 
 	Cache internalcache.Cache
 
-##  缓存当前集群调度的状态，包含所有节点和已调度的 Pod 的状态，以及一些临时假设的 Pod 状态，优化调度流程
+##  缓存当前集群调度的状态，包含所有节点和已调度的 Pod 的状态以及一些临时假设的 Pod 状态，优化调度流程
+
+##  現在のクラスターのスケジューリング状態をキャッシュします。
+##  これには、すべてのノードとスケジュールされた Pod の状態、および一部の仮定された Pod の状態が含まれます。
+##	これにより、スケジューリングプロセスが最適化されます。
+
 
 	Extenders []framework.Extender
 
 ##  扩展器，用以接入自定义的调度策略。
+##	Extenderは、Custom scheduling policyを統合するために使用されます。
 
 	NextPod func(logger klog.Logger) (*framework.QueuedPodInfo, error)
 
 ##  NextPod是一个阻塞函数，这个函数会将调度器暂时挂起，直到有一个新的 Pod 可供调度时，程序才会继续执行。
 ##  这个方法本质也还是用以读取下一个Pod，但是可以优化资源消耗。
+## 	NextPodはブロッキング関数であり
+##	この関数はスケジューラを一時的に停止させ、新しいPodがスケジュール可能になるまでプログラムの実行を保留します。
+##	この方法は本質的に次のPodを読み取るためのものですが、リソース消費を最適化することができます。
 
 	FailureHandler FailureHandlerFn
 
 ##  错误处理，应该是调出日志一类的。
+##	error処理
 
 	SchedulePod func(ctx context.Context, fwk framework.Framework, state *framework.CycleState, pod *v1.Pod) (ScheduleResult, error)
 
-##  SchedulePod会尝试将给定的 Pod 调度到节点列表中的某一个节点。如果调度成功会返回建议的主机名称/编号，否则返回 FitError 与错误原因。
+##  SchedulePod会尝试将给定的 Pod 调度到节点列表中的某一个节点。
+##	如果调度成功会返回建议的节点的名称或编号，否则返回 FitError 与错误原因。
+##	SchedulePodは、指定されたPodをNodelistのいずれかのNodeにスケジュールしようとします。
+##	スケジュールが成功した場合、推奨されるノードの名前または番号を返します。
+##	失敗した場合は、FitErrorとエラーの原因を返します。
 
 	StopEverything <-chan struct{}
 
@@ -33,16 +51,27 @@ type Scheduler struct {
 ##  使用一个通道可以对所有正在监控这个通道的程序进行广播，监测到这个通道关闭后，所有监测到这个变化的程序会在同一时间关闭。
 ##  与布尔标识（Flag）相比的好处：使用布尔标识的互斥手段需要比较复杂的连锁操作，而通过通道进行关闭可以更加简单且安全的进行处理
 
+##	スケジューラの停止
+##	通常、スケジューラはGoroutineでスケジューリングループを実行しながら、StopEverythingチャンネルを監視します。
+##	チャンネルが閉じると、スケジューラはクリーンアップ操作を実行して停止します。
+##	チャンネルを使用することで、このチャンネルを監視しているすべてのプログラムにブロードキャストすることができます。
+##	チャンネルが閉じたことを検知すると、すべての監視プログラムが同時にシャットダウンします。
+##	Flagと比較した利点としては、Flagの使用には複雑な連鎖操作が必要です
+##	チャンネルを使用することで、よりシンプルかつ安全に処理を行うことができます。
+
 	SchedulingQueue internalqueue.SchedulingQueue
 
 ##  SchedulingQueue是调度队列，用来存储等待调度的 Pod
+##	SchedulingQueueはスケジューリングキューであり、スケジューリングを待っているPodを保存するために使用されます。
 
 
 	Profiles profile.Map
 ##  这里是调度配置文件，定义了调度策略和插件
+##	ここにはスケジューリング構成ファイルがあり、スケジューリングポリシーとプラグインが定義されています。
 
 	client clientset.Interface
 ##  用户接口，用于与 API 服务器通信。
+##	ユーザーインターフェースは、APIサーバーと通信するために使用されます。
 
 	nodeInfoSnapshot *internalcache.Snapshot
 ##  生成节点当前的信息快照，用于调度决策。
