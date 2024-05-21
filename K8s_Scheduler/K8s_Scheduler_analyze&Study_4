@@ -1,3 +1,6 @@
+##    这里具体描述了Pod调度的工作方式    ##
+
+
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
     podInfo := sched.NextPod()
 
